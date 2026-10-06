@@ -4,14 +4,14 @@ import subprocess
 import sys
 import threading
 
-SCRAPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scraper.py')
+CRAWLER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'crawler.py')
 
 # Shared lock — ensures playwright jobs run one at a time even if cron fires them simultaneously
 _playwright_lock = threading.Lock()
 
 def _run_playwright(*args, source, campus=None, student=False):
     """Acquire the lock before running playwright so jobs are queued, not concurrent."""
-    cmd = [sys.executable, SCRAPER, '--source', source]
+    cmd = [sys.executable, CRAWLER, '--source', source]
     if campus:
         cmd += ['--campus', campus]
     if student:

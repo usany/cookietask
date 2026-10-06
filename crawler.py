@@ -46,7 +46,7 @@ import re
 import json
 import uuid
 
-class Scraper:
+class Crawler:
     """Scrape menu data from university websites using Playwright"""
 
     @staticmethod
@@ -648,6 +648,6 @@ class Scraper:
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description=Scraper.__doc__)
-    Scraper.add_arguments(parser)
-    Scraper().handle(**vars(parser.parse_args()))
+    parser = argparse.ArgumentParser(description=Crawler.__doc__)
+    Crawler.add_arguments(parser)
+    Crawler().handle(**vars(parser.parse_args()))
