@@ -3,7 +3,6 @@ import sys
 from playwright.sync_api import sync_playwright
 import os
 import pathlib
-import sqlite3
 import random
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
@@ -12,7 +11,8 @@ from openai import OpenAI
 
 load_dotenv()
 
-DB_PATH = os.getenv('MENU_DB', str(pathlib.Path(__file__).parent / 'menu.sqlite3'))
+# Cloudflare D1 (same database and env vars as the Django site's settings.py)
+D1_TABLE = os.getenv('D1_TABLE', 'restaurants_menuitem')  # Django's table name for restaurants.MenuItem
 MENU_FIELDS = ('main', 'side', 'enmain', 'enside', 'price', 'meal', 'day', 'place', 'extra', 'enextra', 'date', 'stamp')
 
 _client = None
@@ -28,18 +28,32 @@ def get_client():
     return _client
 
 def save_menu_item(item_id, fields):
-    """Insert or update a menu item (replaces Django's MenuItem get_or_create/update)."""
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            'CREATE TABLE IF NOT EXISTS menu_item (id TEXT PRIMARY KEY, '
-            + ', '.join(f'{f} TEXT' for f in MENU_FIELDS) + ')'
+    """Insert or update a MenuItem row in Cloudflare D1 (replaces Django's get_or_create/update)."""
+    account_id = os.getenv('CFACCOUNTID')
+    database_id = os.getenv('CFDATABASEID')
+    api_token = os.getenv('CFTOKEN')
+    if not (account_id and database_id and api_token):
+        print('Cloudflare D1 credentials (CFACCOUNTID, CFDATABASEID, CFTOKEN) not found; item not saved.', file=sys.stderr)
+        return
+
+    values = [int(bool(fields.get(f))) if f == 'stamp' else str(fields.get(f, '')) for f in MENU_FIELDS]
+    sql = (
+        f'INSERT INTO {D1_TABLE} (id, {", ".join(MENU_FIELDS)}) VALUES ({", ".join("?" * (len(MENU_FIELDS) + 1))}) '
+        'ON CONFLICT(id) DO UPDATE SET ' + ', '.join(f'{f}=excluded.{f}' for f in MENU_FIELDS)
+    )
+    try:
+        response = requests.post(
+            f'https://api.cloudflare.com/client/v4/accounts/{account_id}/d1/database/{database_id}/query',
+            headers={'Authorization': f'Bearer {api_token}'},
+            json={'sql': sql, 'params': [item_id, *values]},
+            timeout=30,
         )
-        values = [str(fields.get(f, '')) if f != 'stamp' else int(bool(fields.get(f))) for f in MENU_FIELDS]
-        conn.execute(
-            f'INSERT INTO menu_item (id, {", ".join(MENU_FIELDS)}) VALUES ({", ".join("?" * (len(MENU_FIELDS) + 1))}) '
-            f'ON CONFLICT(id) DO UPDATE SET ' + ', '.join(f'{f}=excluded.{f}' for f in MENU_FIELDS),
-            [item_id, *values],
-        )
+        if not response.ok or not response.json().get('success'):
+            print(f'D1 save failed for {item_id}: {response.status_code} {response.text}', file=sys.stderr)
+    except Exception as e:
+        print(f'D1 save failed for {item_id}: {e}', file=sys.stderr)
+
+
 import mimetypes
 import base64
 import re
