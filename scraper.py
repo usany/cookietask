@@ -1,13 +1,9 @@
-import django
-from django.core.management.base import BaseCommand
+import argparse
+import sys
 from playwright.sync_api import sync_playwright
 import os
 import pathlib
-
-# Needed when run as a standalone script (python scraper.py ...); no-op once Django is set up.
-# Requires DJANGO_SETTINGS_MODULE to point at the project that provides the `restaurants` app.
-django.setup()
-from restaurants.models import MenuItem  # noqa: E402
+import sqlite3
 import random
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
@@ -15,24 +11,46 @@ import requests
 from openai import OpenAI
 
 load_dotenv()
-client = OpenAI(
-    api_key=os.getenv("GEMINI_API_KEY"),
-    base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-    # api_key=os.getenv("NVIDIA_NIM_API_KEY"),
-    # base_url="https://integrate.api.nvidia.com/v1",
-    # api_key=os.getenv("VERCELKEY"),
-    # base_url="https://ai-gateway.vercel.sh/v1",
-)
+
+DB_PATH = os.getenv('MENU_DB', str(pathlib.Path(__file__).parent / 'menu.sqlite3'))
+MENU_FIELDS = ('main', 'side', 'enmain', 'enside', 'price', 'meal', 'day', 'place', 'extra', 'enextra', 'date', 'stamp')
+
+_client = None
+
+def get_client():
+    """Create the Gemini (OpenAI-compatible) client on first use so a missing key doesn't crash at import."""
+    global _client
+    if _client is None:
+        _client = OpenAI(
+            api_key=os.getenv("GEMINI_API_KEY"),
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+        )
+    return _client
+
+def save_menu_item(item_id, fields):
+    """Insert or update a menu item (replaces Django's MenuItem get_or_create/update)."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            'CREATE TABLE IF NOT EXISTS menu_item (id TEXT PRIMARY KEY, '
+            + ', '.join(f'{f} TEXT' for f in MENU_FIELDS) + ')'
+        )
+        values = [str(fields.get(f, '')) if f != 'stamp' else int(bool(fields.get(f))) for f in MENU_FIELDS]
+        conn.execute(
+            f'INSERT INTO menu_item (id, {", ".join(MENU_FIELDS)}) VALUES ({", ".join("?" * (len(MENU_FIELDS) + 1))}) '
+            f'ON CONFLICT(id) DO UPDATE SET ' + ', '.join(f'{f}=excluded.{f}' for f in MENU_FIELDS),
+            [item_id, *values],
+        )
 import mimetypes
 import base64
 import re
 import json
 import uuid
 
-class Command(BaseCommand):
-    help = 'Scrape menu data from university websites using Playwright'
-    
-    def add_arguments(self, parser):
+class Scraper:
+    """Scrape menu data from university websites using Playwright"""
+
+    @staticmethod
+    def add_arguments(parser):
         parser.add_argument(
             '--source',
             type=str,
@@ -57,7 +75,7 @@ class Command(BaseCommand):
         is_student = options.get('student')
 
         if not source:
-            self.stdout.write(self.style.ERROR('Please specify --source (khu, hufs, or dorm)'))
+            print('Please specify --source (khu, hufs, or dorm)')
             return
 
         with sync_playwright() as p:
@@ -67,7 +85,7 @@ class Command(BaseCommand):
                 self.scrap_hufs(p, is_student)
             elif source == 'khu':
                 if not campus:
-                    self.stdout.write(self.style.ERROR('Please specify --campus (seoul or global) for KHU'))
+                    print('Please specify --campus (seoul or global) for KHU')
                     return
                 is_seoul = campus == 'seoul'
                 self.scrap(p, is_seoul)
@@ -78,7 +96,7 @@ class Command(BaseCommand):
         context = browser.new_context()
         page = context.new_page()
         
-        self.stdout.write('Navigating to the list page...')
+        print('Navigating to the list page...')
         link = 'https://dorm2.khu.ac.kr/50/5030.do#'
         page.goto(link, timeout=60000)
         
@@ -87,8 +105,8 @@ class Command(BaseCommand):
         raw_dates = page.locator('[id^="vDate"]').all_inner_texts()
         dates = [date.split('년', 1)[0].strip()+('0'+date.split('년', 1)[1].split('월', 1)[0].strip() if len(date.split('년', 1)[1].split('월', 1)[0].strip()) == 1 else date.split('년', 1)[1].split('월', 1)[0].strip())+('0'+date.split('월', 1)[1].split('일', 1)[0].strip() if len(date.split('월', 1)[1].split('일', 1)[0].strip()) == 1 else date.split('월', 1)[1].split('일', 1)[0].strip()) for date in raw_dates]
         menu_texts = page.locator('td.te_left').all_inner_texts()
-        self.stdout.write(str(menu_texts))
-        self.stdout.write(f'Found {len(menu_texts)} items')
+        print(str(menu_texts))
+        print(f'Found {len(menu_texts)} items')
         
         browser.close()
         
@@ -157,9 +175,7 @@ class Command(BaseCommand):
                         stamp=False,
                     )
                     if main:
-                        obj, created = MenuItem.objects.get_or_create(id=item_id, defaults=defaults_dict)
-                        if not created:
-                            MenuItem.objects.filter(id=item_id).update(**defaults_dict)
+                        save_menu_item(item_id, defaults_dict)
                     
                     self.generate_image(main, enmain) if main else None
 
@@ -185,9 +201,7 @@ class Command(BaseCommand):
                         stamp=False,
                     )
                     if main:
-                        obj, created = MenuItem.objects.get_or_create(id=item_id2, defaults=defaults_dict2)
-                        if not created:
-                            MenuItem.objects.filter(id=item_id2).update(**defaults_dict2)
+                        save_menu_item(item_id2, defaults_dict2)
                     self.generate_image(main, enmain) if main else None
 
                 else:
@@ -216,9 +230,7 @@ class Command(BaseCommand):
                         stamp=False,
                     )
                     if main:
-                        obj, created = MenuItem.objects.get_or_create(id=item_id3, defaults=defaults_dict3)
-                        if not created:
-                            MenuItem.objects.filter(id=item_id3).update(**defaults_dict3)
+                        save_menu_item(item_id3, defaults_dict3)
                     self.generate_image(main, enmain) if main else None
 
         with ThreadPoolExecutor(max_workers=1) as executor:
@@ -230,7 +242,7 @@ class Command(BaseCommand):
         context = browser.new_context()
         page = context.new_page()
         
-        self.stdout.write('Navigating to the list page...')
+        print('Navigating to the list page...')
         link = 'https://www.hufs.ac.kr/hufs/11318/subview.do#click'
         # if is_student:
         #     link = 'https://www.hufs.ac.kr/hufs/11318/subview.do#click'
@@ -246,8 +258,8 @@ class Command(BaseCommand):
         dates = [elem.get_attribute('id').replace('date_', '').replace('-', '') for elem in date_elements]
         day_date_map = {day: date for day, date in zip(days, dates)}
         menu_texts = page.locator('td.no-menu, td.menu').all_inner_texts()
-        self.stdout.write(str(menu_texts))
-        self.stdout.write(f'Found {len(menu_texts)} items')
+        print(str(menu_texts))
+        print(f'Found {len(menu_texts)} items')
 
         browser.close()
 
@@ -302,9 +314,7 @@ class Command(BaseCommand):
                     date=date,
                     stamp=False,
                 )
-                obj, created = MenuItem.objects.get_or_create(id=item_id, defaults=defaults_dict4)
-                if not created:
-                    MenuItem.objects.filter(id=item_id).update(**defaults_dict4)
+                save_menu_item(item_id, defaults_dict4)
                 self.generate_image(main, enmain)
 
         with ThreadPoolExecutor(max_workers=1) as executor:
@@ -317,7 +327,7 @@ class Command(BaseCommand):
         context = browser.new_context()
         page = context.new_page()
         
-        self.stdout.write('Navigating to the list page...')
+        print('Navigating to the list page...')
         if is_seoul:
             link = 'https://www.khu.ac.kr/kor/user/bbs/BMSR00040/list.do?menuNo=200283&catId=136'
         else:
@@ -339,7 +349,7 @@ class Command(BaseCommand):
                     'onclick': element.get_attribute('onclick')
                 })
         
-        self.stdout.write(f'Found {len(raw_links)} links in tbody.')
+        print(f'Found {len(raw_links)} links in tbody.')
         
         # Create download directory
         download_dir = pathlib.Path(__file__).parent / 'downloads'
@@ -347,7 +357,7 @@ class Command(BaseCommand):
         
         for link_data in raw_links:
             if not link_data['href'] or link_data['href'].startswith('javascript:'):
-                self.stdout.write(f'Handling link: {link_data["text"]}')
+                print(f'Handling link: {link_data["text"]}')
                 
                 if page.url != link:
                     page.goto(link, timeout=60000)
@@ -357,14 +367,14 @@ class Command(BaseCommand):
                     with page.expect_navigation(wait_until='domcontentloaded'):
                         page.locator('tbody a').filter(has_text=link_data['text']).first.click()
                 except Exception as err:
-                    self.stdout.write(self.style.ERROR(f'Failed to navigate to {link_data["text"]}: {str(err)}'))
+                    print(f'Failed to navigate to {link_data["text"]}: {str(err)}')
                     continue
             else:
-                self.stdout.write(f'Visiting URL: {link_data["href"]}')
+                print(f'Visiting URL: {link_data["href"]}')
                 try:
                     page.goto(link_data['href'], wait_until='domcontentloaded')
                 except Exception as err:
-                    self.stdout.write(self.style.ERROR(f'Failed to visit {link_data["href"]}: {str(err)}'))
+                    print(f'Failed to visit {link_data["href"]}: {str(err)}')
                     continue
             
             title = page.locator('p.txt06').first.inner_text().strip()
@@ -376,7 +386,7 @@ class Command(BaseCommand):
                 src = img.get_attribute('src')
                 if src and src.endswith('.png') and 'decoGnb' not in src and 'footLogo' not in src and 'ico' not in src:                    image_urls.append(src)
                 elif src and src.endswith('.jpg') and 'decoGnb' not in src and 'footLogo' not in src and 'ico' not in src:                    image_urls.append(src)
-            self.stdout.write(f'Found {len(image_urls)} PNG images on this page.')
+            print(f'Found {len(image_urls)} PNG images on this page.')
             
             for img_url in image_urls:
                 try:
@@ -396,17 +406,17 @@ class Command(BaseCommand):
                     response = page.request.get(absolute_img_url)
                     if response.status == 200:
                         local_path.write_bytes(response.body())
-                        self.stdout.write(self.style.SUCCESS(f'Downloaded: {image_name}'))
+                        print(f'Downloaded: {image_name}')
                         self.get_menu(str(local_path), title)
                 except Exception as err:
-                    self.stdout.write(self.style.ERROR(f'Failed to download image {img_url}: {str(err)}'))
+                    print(f'Failed to download image {img_url}: {str(err)}')
             
             # Go back to the list page for the next item
             page.goto('https://www.khu.ac.kr/kor/user/bbs/BMSR00040/list.do?menuNo=200283', timeout=60000)
             page.wait_for_selector('tbody')
         
         browser.close()
-        self.stdout.write(self.style.SUCCESS('Done.'))
+        print('Done.')
 
     
     def translate_text(self, texts):
@@ -422,7 +432,7 @@ class Command(BaseCommand):
         gemini_api_key = os.getenv('GEMINI_API_KEY')
         
         if not gemini_api_key:
-            self.stderr.write(self.style.ERROR('Gemini API key not found in environment variables.'))
+            print('Gemini API key not found in environment variables.', file=sys.stderr)
             return texts
         
         # Handle single string input
@@ -437,10 +447,10 @@ class Command(BaseCommand):
 
         for model in ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro",None]:
             if model is None:
-                self.stderr.write(self.style.ERROR("All Gemini models failed for translation."))
+                print("All Gemini models failed for translation.", file=sys.stderr)
                 return texts
             try:
-                response = client.chat.completions.create(
+                response = get_client().chat.completions.create(
                     model=model,
                     messages=[
                         {"role": "user", "content": prompt}
@@ -449,7 +459,7 @@ class Command(BaseCommand):
                 translations = response.choices[0].message.content.strip().split('\n')
 
                 for ko, en in zip(text_list, translations):
-                    self.stdout.write(f'  {ko} -> {en}')
+                    print(f'  {ko} -> {en}')
 
                 # Return in the same format as input
                 if is_single:
@@ -458,15 +468,15 @@ class Command(BaseCommand):
                     if len(translations) == len(text_list):
                         return translations
                     else:
-                        # self.stdout.write(translations)
-                        # self.stdout.write(text_list)
-                        self.stderr.write(self.style.WARNING(f"Model {model} returned {len(translations)} translations for {len(text_list)} texts. Trying next..."))
-                        self.stderr.write(self.style.WARNING(f"translations: {translations}"))
-                        self.stderr.write(self.style.WARNING(f"text_list: {text_list}"))
+                        # print(translations)
+                        # print(text_list)
+                        print(f"Model {model} returned {len(translations)} translations for {len(text_list)} texts. Trying next...", file=sys.stderr)
+                        print(f"translations: {translations}", file=sys.stderr)
+                        print(f"text_list: {text_list}", file=sys.stderr)
                         continue
 
             except Exception as e:
-                self.stderr.write(self.style.ERROR(f"Model {model} failed: {str(e)}. Trying next..."))
+                print(f"Model {model} failed: {str(e)}. Trying next...", file=sys.stderr)
                 continue
 
     def generate_image(self, main, enmain):
@@ -476,10 +486,10 @@ class Command(BaseCommand):
         api_token = os.getenv('CFAPITOKEN')
 
         if not account_id or not api_token:
-            self.stderr.write(self.style.ERROR('Cloudflare credentials not found in environment variables.'))
+            print('Cloudflare credentials not found in environment variables.', file=sys.stderr)
             return
 
-        self.stdout.write(f'{main}\t{enmain}')
+        print(f'{main}\t{enmain}')
         # Step 1: Use the English dish name directly
         translated_text = enmain
 
@@ -505,12 +515,12 @@ class Command(BaseCommand):
             if image_response.status_code == 200:
                 with open(f"{safe_main}.png", "wb") as f:
                     f.write(image_response.content)
-                self.stdout.write(self.style.SUCCESS(f"Image saved as {safe_main}.png"))
+                print(f"Image saved as {safe_main}.png")
                 self.upload_to_storage(f"{safe_main}.png", f"{safe_main}")
             else:
-                self.stderr.write(self.style.ERROR(f"Image generation API error: {image_response.status_code} {image_response.text}"))
+                print(f"Image generation API error: {image_response.status_code} {image_response.text}", file=sys.stderr)
         except Exception as e:
-            self.stderr.write(self.style.ERROR(f"Error generating image: {str(e)}"))
+            print(f"Error generating image: {str(e)}", file=sys.stderr)
 
     def upload_to_storage(self, file_path, object_name):
         """Upload image to storage using PUT with PAR token"""
@@ -522,7 +532,7 @@ class Command(BaseCommand):
         url = f"{storage_url}{object_name}"
 
         if not os.path.exists(file_path):
-            self.stderr.write(self.style.ERROR(f'File not found: {file_path}'))
+            print(f'File not found: {file_path}', file=sys.stderr)
             return
 
         try:
@@ -531,14 +541,17 @@ class Command(BaseCommand):
                 response = requests.put(url, data=file_data, timeout=10)
 
             if response.status_code in [200, 201]:
-                self.stdout.write(self.style.SUCCESS(f'Successfully uploaded {file_path} to storage'))
+                print(f'Successfully uploaded {file_path} to storage')
             else:
-                self.stderr.write(self.style.ERROR(f'Failed to upload: {response.status_code} {response.text}'))
+                print(f'Failed to upload: {response.status_code} {response.text}', file=sys.stderr)
         except Exception as e:
-            self.stderr.write(self.style.ERROR(f'Error uploading to storage: {str(e)}'))
+            print(f'Error uploading to storage: {str(e)}', file=sys.stderr)
     
     def get_menu(self, img_path, title=""):
         load_dotenv()
+        if not os.getenv('GEMINI_API_KEY'):
+            print('Gemini API key not found in environment variables; skipping menu extraction.', file=sys.stderr)
+            return
 
         
         try:
@@ -581,15 +594,15 @@ class Command(BaseCommand):
             
             for model in ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro",None]:
                 if model is None:
-                    self.stderr.write(self.style.ERROR("All Gemini models failed for get_menu."))
+                    print("All Gemini models failed for get_menu.", file=sys.stderr)
                     break
                 try:
-                    response = client.chat.completions.create(model=model, messages=messages)
+                    response = get_client().chat.completions.create(model=model, messages=messages)
                 except Exception as model_err:
-                    self.stderr.write(self.style.ERROR(f"Model {model} failed: {str(model_err)}. Trying next..."))
+                    print(f"Model {model} failed: {str(model_err)}. Trying next...", file=sys.stderr)
                     continue
 
-                self.stdout.write(f'Gemini response: {model} {response.choices[0].message.content}')
+                print(f'Gemini response: {model} {response.choices[0].message.content}')
 
                 # Strip markdown code fences if present, then parse into a list
                 raw = response.choices[0].message.content.strip()
@@ -623,19 +636,18 @@ class Command(BaseCommand):
                             date=menu.get('date', ''),
                             stamp=menu.get('stamp', False),
                         )
-                        obj, created = MenuItem.objects.get_or_create(id=item_id5, defaults=defaults_dict5)
-                        if not created:
-                            MenuItem.objects.filter(id=item_id5).update(**defaults_dict5)
-                        self.stdout.write(self.style.SUCCESS(f"Successfully posted item: {menu.get('main', 'Unknown Menu Item')}"))
+                        save_menu_item(item_id5, defaults_dict5)
+                        print(f"Successfully posted item: {menu.get('main', 'Unknown Menu Item')}")
                         self.generate_image(menu.get('main', ''), menu.get('enmain', menu.get('main', '')))
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     executor.submit(_save_items, collection).result()
                 break  # success — no need to try next model
 
         except Exception as err:
-            self.stderr.write(self.style.ERROR(f'Error: {err}'))
+            print(f'Error: {err}', file=sys.stderr)
 
 
 if __name__ == '__main__':
-    import sys
-    Command().run_from_argv([sys.argv[0], 'scraper', *sys.argv[1:]])
+    parser = argparse.ArgumentParser(description=Scraper.__doc__)
+    Scraper.add_arguments(parser)
+    Scraper().handle(**vars(parser.parse_args()))
