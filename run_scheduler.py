@@ -1,15 +1,19 @@
+import os
 import signal
 import sys
-from django.core.management.base import BaseCommand
-from restaurants.scheduler import start, stop
+import time
 
 
-class Command(BaseCommand):
+
+from scheduler import start, stop  # noqa: E402
+
+
+class Command:
     help = 'Start the APScheduler and keep the process alive'
 
     def handle(self, *args, **options):
         def sigterm_handler(signum, frame):
-            self.stdout.write('Received SIGTERM, shutting down scheduler...')
+            print('Received SIGTERM, shutting down scheduler...')
             stop()
             sys.exit(0)
 
@@ -17,8 +21,11 @@ class Command(BaseCommand):
         signal.signal(signal.SIGINT, sigterm_handler)
 
         start()
-        self.stdout.write(self.style.SUCCESS('Scheduler started. Waiting for jobs...'))
+        print('Scheduler started. Waiting for jobs...')
 
-        import time
         while True:
             time.sleep(1)
+
+
+if __name__ == '__main__':
+    Command().handle()
