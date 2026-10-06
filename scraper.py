@@ -1,8 +1,13 @@
+import django
 from django.core.management.base import BaseCommand
 from playwright.sync_api import sync_playwright
 import os
 import pathlib
-from restaurants.models import MenuItem
+
+# Needed when run as a standalone script (python scraper.py ...); no-op once Django is set up.
+# Requires DJANGO_SETTINGS_MODULE to point at the project that provides the `restaurants` app.
+django.setup()
+from restaurants.models import MenuItem  # noqa: E402
 import random
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
@@ -629,3 +634,8 @@ class Command(BaseCommand):
 
         except Exception as err:
             self.stderr.write(self.style.ERROR(f'Error: {err}'))
+
+
+if __name__ == '__main__':
+    import sys
+    Command().run_from_argv([sys.argv[0], 'scraper', *sys.argv[1:]])

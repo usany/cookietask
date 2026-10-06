@@ -1,14 +1,24 @@
 from apscheduler.schedulers.background import BackgroundScheduler
-from django.core.management import call_command
+import os
+import subprocess
+import sys
 import threading
+
+SCRAPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scraper.py')
 
 # Shared lock — ensures playwright jobs run one at a time even if cron fires them simultaneously
 _playwright_lock = threading.Lock()
 
-def _run_playwright(*args, **kwargs):
+def _run_playwright(*args, source, campus=None, student=False):
     """Acquire the lock before running playwright so jobs are queued, not concurrent."""
+    cmd = [sys.executable, SCRAPER, '--source', source]
+    if campus:
+        cmd += ['--campus', campus]
+    if student:
+        cmd.append('--student')
     with _playwright_lock:
-        call_command(*args, **kwargs)
+        print(f'Running: {" ".join(cmd)}')
+        subprocess.run(cmd, check=False)
 
 # Create scheduler 
 # scheduler = BackgroundScheduler()
