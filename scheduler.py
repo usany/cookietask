@@ -1,4 +1,4 @@
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.blocking import BlockingScheduler
 import os
 import subprocess
 import sys
@@ -21,11 +21,10 @@ def _run_playwright(*args, source, campus=None, student=False):
         subprocess.run(cmd, check=False)
 
 # Create scheduler 
-# scheduler = BackgroundScheduler()
-scheduler = BackgroundScheduler(timezone='Asia/Seoul')
+scheduler = BlockingScheduler(timezone='Asia/Seoul')
 min = 5
-def start():
-    """Start the scheduler with scheduled jobs"""
+def add_jobs():
+    """Register the scheduled playwright jobs"""
     
     # Clear expired sessions daily at 3 AM
     # scheduler.add_job(
@@ -94,10 +93,12 @@ def start():
         minute=min + 20,
         replace_existing=True
     )
-    
-    if not scheduler.running:
-        scheduler.start()
 
-def stop():
-    """Stop the scheduler"""
-    scheduler.shutdown()
+
+if __name__ == '__main__':
+    add_jobs()
+    print('Scheduler started. Waiting for jobs...')
+    try:
+        scheduler.start()  # blocks until Ctrl+C / SIGTERM
+    except (KeyboardInterrupt, SystemExit):
+        print('Shutting down scheduler...')
